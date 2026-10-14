@@ -11,18 +11,11 @@ import {
 import { logger } from "../utils/logger.js";
 
 /**
- * Glints Indonesia Scraper — DOM Parsing via Aria Labels
+ * Glints Indonesia Scraper
  *
- * Diagnosis result:
- * - GraphQL intercept only captures location endpoint, NOT job search
- * - But Glints renders job cards in the DOM using a stable structure:
- *   - Wrapper: div[role="article"][aria-label^="Job: "]
- *   - Title:   a[aria-label^="Job card title:"]  OR  h2.CompactJobTitle
- *   - Job ID:  data-gtm-job-id attribute
- *   - Type:    data-gtm-job-type attribute
- *   - Meta:    innerText of card contains salary, type, experience on separate lines
- *
- * Strategy: navigate to search page, wait for cards, parse DOM with page.evaluate()
+ * Uses dual-layer DOM parsing:
+ * 1. Primary: accessibility attributes `[aria-label^="Job: "]`
+ * 2. Secondary fallback: article wrappers, `[data-gtm-job-id]`, and job title elements
  */
 export class GlintsScraper implements IScraper {
   source = "glints" as const;
@@ -36,32 +29,21 @@ export class GlintsScraper implements IScraper {
       `?keyword=${encodeURIComponent(keyword)}` +
       (cityName ? `&locationName=${encodeURIComponent(cityName)}` : "");
 
-    logger.info("[Glints] Starting DOM scrape", { keyword, location, page, url: searchUrl });
+    logger.info("[Glints] Starting scrape", { keyword, location, page, url: searchUrl });
 
     const browser = await getBrowser();
     const context = await createContext(browser);
-    const browserPage = await createPage(context);
+    const browserPage = await createPage(context, { blockResources: false });
 
     try {
-      await browserPage.goto(searchUrl, { waitUntil: "domcontentloaded" });
+      await browserPage.goto(searchUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
+      await randomDelay(3000, 4500);
 
-      // Wait for job cards to appear in DOM
-      // Glints renders with styled-components so class names are hashed,
-      // but aria-label is stable
-      await browserPage
-        .waitForSelector('[aria-label^="Job card title:"], [aria-label^="Job:"]', { timeout: 15000 })
-        .catch(() => logger.warn("[Glints] Job card selector timeout, trying anyway"));
-
-      await randomDelay(2000, 3000);
-
-      // Scroll a bit to trigger lazy loading of more cards
+      // Scroll to trigger lazy loading of styled-component cards
       await browserPage.evaluate(() => window.scrollBy(0, 800));
-      await randomDelay(1000, 1500);
+      await randomDelay(1500, 2500);
 
-      // Extract job data from DOM
-      type CardData = {
-        jobId: string;
-        ariaLabel: string;
+      type GlintsExtractedCard = {
         title: string;
         company: string;
         location: string;
@@ -70,10 +52,8 @@ export class GlintsScraper implements IScraper {
         cardText: string;
       };
 
-      const cards: CardData[] = await browserPage.evaluate(() => {
+      const cards: GlintsExtractedCard[] = await browserPage.evaluate(() => {
         const results: {
-          jobId: string;
-          ariaLabel: string;
           title: string;
           company: string;
           location: string;
@@ -82,93 +62,104 @@ export class GlintsScraper implements IScraper {
           cardText: string;
         }[] = [];
 
-        // Primary selector: the outer wrapper with job meta in aria-label
-        // "Job: Frontend Developer, Company: PT Sigma, Location: Setiabudi"
-        const wrappers = Array.from(
-          document.querySelectorAll('[aria-label^="Job: "]')
-        ) as HTMLElement[];
+        // Strategy 1: Check elements with aria-label^="Job: "
+        const wrappers = Array.from(document.querySelectorAll('[aria-label^="Job: "]')) as HTMLElement[];
 
-        wrappers.forEach((wrapper) => {
+        for (const wrapper of wrappers) {
           const ariaLabel = wrapper.getAttribute("aria-label") ?? "";
+          const ariaMatch = ariaLabel.match(/^Job:\s*(.+?),\s*Company:\s*(.+?),\s*Location:\s*(.+)$/);
 
-          // Parse from aria-label (very reliable source)
-          const ariaMatch = ariaLabel.match(
-            /^Job:\s*(.+?),\s*Company:\s*(.+?),\s*Location:\s*(.+)$/
-          );
+          const cardContainer = (wrapper.closest('[class*="JobCard"], [class*="Card"]') ?? wrapper) as HTMLElement;
+          const titleEl = cardContainer.querySelector('[aria-label^="Job card title:"], h2, h3');
+          const title = titleEl ? titleEl.textContent!.replace(/^Job card title:\s*/, "").trim() : (ariaMatch?.[1] ?? "");
+          const company = ariaMatch?.[2] ?? cardContainer.querySelector('[class*="Company"], [class*="company"]')?.textContent?.trim() ?? "";
+          const location = ariaMatch?.[3] ?? cardContainer.querySelector('[class*="Location"], [class*="location"]')?.textContent?.trim() ?? "";
 
-          // Find the card link container
-          const cardContainer = wrapper.closest(
-            '[class*="CompactJobCard"]'
-          ) as HTMLElement | null ?? wrapper;
-
-          // Job title from dedicated aria-label link
-          const titleEl = cardContainer.querySelector('[aria-label^="Job card title:"]');
-          const title = titleEl
-            ? titleEl.getAttribute("aria-label")!.replace(/^Job card title:\s*/, "").trim()
-            : (ariaMatch?.[1] ?? "");
-
-          const company = ariaMatch?.[2] ?? "";
-          const location = ariaMatch?.[3] ?? "";
-
-          // Job ID from GTM data attribute
-          const jobIdEl = cardContainer.querySelector("[data-gtm-job-id]");
-          const jobId = jobIdEl?.getAttribute("data-gtm-job-id") ?? "";
-
-          // Job type from GTM attribute
-          const jobType = jobIdEl?.getAttribute("data-gtm-job-type") ?? "";
-
-          // Link href
-          const linkEl = titleEl?.closest("a") as HTMLAnchorElement | null
-            ?? cardContainer.querySelector("a[href*='/opportunities/jobs/']") as HTMLAnchorElement | null;
-          const href = linkEl?.href ?? `https://glints.com/id/opportunities/jobs/${jobId}`;
-
-          // Full card text (contains salary, work type, experience, etc.)
+          const linkEl = cardContainer.querySelector('a[href*="/opportunities/jobs/"]') as HTMLAnchorElement | null;
+          const href = linkEl?.href ?? "";
+          const gtmId = cardContainer.querySelector("[data-gtm-job-id]")?.getAttribute("data-gtm-job-id") ?? "";
+          const jobType = cardContainer.querySelector("[data-gtm-job-type]")?.getAttribute("data-gtm-job-type") ?? "";
           const cardText = cardContainer.innerText ?? "";
 
-          if (title && company) {
-            results.push({ jobId, ariaLabel, title, company, location, href, jobType, cardText });
+          if (title && (company || ariaMatch)) {
+            results.push({
+              title,
+              company: company || "Perusahaan",
+              location,
+              href: href || (gtmId ? `https://glints.com/id/opportunities/jobs/${gtmId}` : ""),
+              jobType,
+              cardText,
+            });
           }
-        });
+        }
+
+        // Strategy 2: If aria-labels were not present, fallback to job card links
+        if (results.length === 0) {
+          const jobLinks = Array.from(document.querySelectorAll('a[href*="/opportunities/jobs/"]')) as HTMLAnchorElement[];
+          const seenHrefs = new Set<string>();
+
+          for (const link of jobLinks) {
+            const href = link.href.split("?")[0];
+            if (!href || seenHrefs.has(href)) continue;
+            seenHrefs.add(href);
+
+            const card = (link.closest('[class*="Card"], [class*="card"], [class*="Wrapper"]') ?? link.parentElement?.parentElement) as HTMLElement | null;
+            if (!card) continue;
+
+            const title = card.querySelector("h2, h3, [class*='Title']")?.textContent?.trim() ?? link.innerText.trim();
+            const company = card.querySelector("[class*='Company'], [class*='company']")?.textContent?.trim() ?? "Perusahaan";
+            const location = card.querySelector("[class*='Location'], [class*='location']")?.textContent?.trim() ?? "";
+
+            if (title && title.length > 2) {
+              results.push({
+                title,
+                company,
+                location,
+                href,
+                jobType: "",
+                cardText: card.innerText ?? "",
+              });
+            }
+          }
+        }
 
         return results;
       });
 
-      logger.info("[Glints] Cards extracted from DOM", { count: cards.length });
+      logger.info("[Glints] Extracted cards from page", { count: cards.length });
 
-      if (cards.length === 0) {
-        logger.warn("[Glints] No cards found, trying fallback selectors");
-        return await this.parseFallback(browserPage, limit, location ?? "Indonesia", keyword);
-      }
+      const results: JobResult[] = [];
 
-      // Parse the cardText to extract salary, employment type, workplace type
-      const results: JobResult[] = cards.slice(0, limit).map((card) => {
-        const salaryMatch = card.cardText.match(
-          /Rp\s?[\d,.]+\s?[-–]\s?[\d,.]+jt|Rp\s?[\d,.]+(jt|rb)?/i
-        );
+      for (const card of cards.slice(0, limit)) {
+        if (!card.title) continue;
+
+        const salaryMatch = card.cardText.match(/Rp\s?[\d,.]+\s?[-–]\s?[\d,.]+jt|Rp\s?[\d,.]+(jt|rb)?/i);
         const salaryRaw = salaryMatch ? salaryMatch[0].trim() : null;
         const { salary_min, salary_max, currency } = parseSalary(
           salaryRaw?.replace(/jt/gi, "000000").replace(/rb/gi, "000") ?? null
         );
 
-        return makeJobResult("glints", {
-          title: card.title,
-          company: card.company,
-          location: card.location || location || "Indonesia",
-          description: null,
-          employment_type: parseEmploymentType(card.jobType || card.cardText),
-          workplace_type: card.cardText.toLowerCase().includes("remote")
-            ? "remote"
-            : card.cardText.toLowerCase().includes("hybrid")
-            ? "hybrid"
-            : parseWorkplaceType(card.location),
-          salary_raw: salaryRaw,
-          salary_min,
-          salary_max,
-          currency,
-          source_url: card.href || `https://glints.com/id/opportunities/jobs/${card.jobId}`,
-          posted_at: null,
-        });
-      });
+        results.push(
+          makeJobResult("glints", {
+            title: card.title,
+            company: card.company,
+            location: card.location || location || "Indonesia",
+            description: null,
+            employment_type: parseEmploymentType(card.jobType || card.cardText),
+            workplace_type: card.cardText.toLowerCase().includes("remote")
+              ? "remote"
+              : card.cardText.toLowerCase().includes("hybrid")
+              ? "hybrid"
+              : parseWorkplaceType(card.location),
+            salary_raw: salaryRaw,
+            salary_min,
+            salary_max,
+            currency,
+            source_url: card.href || searchUrl,
+            posted_at: null,
+          })
+        );
+      }
 
       logger.info("[Glints] Scrape completed", { found: results.length });
       return results;
@@ -178,63 +169,6 @@ export class GlintsScraper implements IScraper {
     } finally {
       await browserPage.close();
       await context.close();
-    }
-  }
-
-  /** Last-resort: parse whatever text content we can find */
-  private async parseFallback(
-    page: import("playwright").Page,
-    limit: number,
-    fallbackLocation: string,
-    keyword: string
-  ): Promise<JobResult[]> {
-    try {
-      type FallbackCard = { title: string; company: string; text: string; href: string };
-      const cards: FallbackCard[] = await page.evaluate(() => {
-        const results: { title: string; company: string; text: string; href: string }[] = [];
-
-        // Try h2 job titles
-        const h2s = Array.from(document.querySelectorAll("h2")) as HTMLElement[];
-        h2s.forEach((h2) => {
-          const text = h2.innerText.trim();
-          if (text.length < 3 || text.length > 150) return;
-          const card = h2.closest('[class*="Card"], [class*="Job"], [class*="Opportunity"]') as HTMLElement | null;
-          const cardText = card?.innerText ?? "";
-          const link = (h2.closest("a") ?? card?.querySelector("a")) as HTMLAnchorElement | null;
-
-          // Try to find company near the title
-          const companyEl = card?.querySelector('[class*="company"], [class*="Company"]') as HTMLElement | null;
-
-          results.push({
-            title: text,
-            company: companyEl?.innerText.trim() ?? "",
-            text: cardText.slice(0, 500),
-            href: link?.href ?? "",
-          });
-        });
-
-        return results.filter((r) => r.title.length > 2).slice(0, 30);
-      });
-
-      return cards.slice(0, limit).map((c) =>
-        makeJobResult("glints", {
-          title: c.title,
-          company: c.company || "Tidak Diketahui",
-          location: fallbackLocation,
-          description: cleanDescription(c.text),
-          employment_type: parseEmploymentType(c.text),
-          workplace_type: parseWorkplaceType(c.text),
-          salary_raw: null,
-          salary_min: null,
-          salary_max: null,
-          source_url:
-            c.href ||
-            `https://glints.com/id/opportunities/jobs/explore?keyword=${encodeURIComponent(keyword)}`,
-          posted_at: null,
-        })
-      );
-    } catch {
-      return [];
     }
   }
 

@@ -2,7 +2,7 @@ import { scraperRegistry } from "../scrapers/registry.js";
 import type { QueuedJob, ScraperSource, ScrapeQuery } from "../types/index.js";
 import { logger } from "../utils/logger.js";
 
-const MAX_CONCURRENT = Number(process.env.MAX_CONCURRENT_SCRAPERS ?? 2);
+const MAX_CONCURRENT = 1; // Run 1 queued scrape job at a time to prevent resource contention
 
 interface EnqueueInput {
   id: string;
@@ -66,18 +66,20 @@ class ScrapeQueue {
     const allResults: QueuedJob["result"] = [];
     const errors: string[] = [];
 
-    await Promise.allSettled(
-      job.sources.map(async (source) => {
-        try {
-          const scraper = scraperRegistry[source];
-          const results = await scraper.scrape(job.query);
-          allResults!.push(...results);
-        } catch (err) {
-          errors.push(`${source}: ${String(err)}`);
-          logger.error("[Queue] Scraper error", { source, jobId: job.id, error: String(err) });
-        }
-      })
-    );
+    // Run sources sequentially to ensure stability and reliable card rendering
+    for (const source of job.sources) {
+      try {
+        const scraper = scraperRegistry[source];
+        if (!scraper) continue;
+        logger.info(`[Queue] Running scraper for source: ${source}`);
+        const results = await scraper.scrape(job.query);
+        allResults!.push(...results);
+        logger.info(`[Queue] Completed source: ${source} with ${results.length} results`);
+      } catch (err) {
+        errors.push(`${source}: ${String(err)}`);
+        logger.error("[Queue] Scraper error", { source, jobId: job.id, error: String(err) });
+      }
+    }
 
     job.finished_at = new Date().toISOString();
 

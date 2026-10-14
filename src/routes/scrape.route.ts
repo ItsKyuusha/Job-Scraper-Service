@@ -1,3 +1,4 @@
+import pLimit from "p-limit";
 import { Router, Request, Response } from "express";
 import { v4 as uuidv4 } from "uuid";
 import { scraperRegistry } from "../scrapers/registry.js";
@@ -6,6 +7,9 @@ import type { ScrapeQuery, ScraperSource, ScrapeSuccessResponse, ScrapeErrorResp
 import { logger } from "../utils/logger.js";
 
 export const scrapeRouter = Router();
+
+// Limit concurrent browser tabs to avoid RAM starvation and timeouts on single machine
+const scrapeConcurrency = pLimit(1);
 
 // ─── Validation helper ────────────────────────────────────────────────────────
 
@@ -27,15 +31,7 @@ function parseQuery(req: Request): { query: ScrapeQuery; sources: ScraperSource[
 
 // ─── GET /api/scrape ──────────────────────────────────────────────────────────
 /**
- * Synchronous single-source or multi-source scrape.
- * Returns results immediately (may take 5–30s depending on source).
- *
- * Query params:
- *   - keyword (required): job title/role
- *   - location (optional): city or "remote" (default: "Indonesia")
- *   - sources (optional): comma-separated list or "all" (default: "all")
- *   - page (optional): pagination page (default: 1)
- *   - limit (optional): max results per source (default: 20, max: 50)
+ * Synchronous multi-source scrape with sequential execution to preserve browser resources.
  */
 scrapeRouter.get("/", async (req: Request, res: Response) => {
   const { query, sources } = parseQuery(req);
@@ -51,21 +47,22 @@ scrapeRouter.get("/", async (req: Request, res: Response) => {
   const allResults: ScrapeSuccessResponse["results"] = [];
   const errors: string[] = [];
 
-  await Promise.allSettled(
-    sources.map(async (source) => {
-      const scraper = scraperRegistry[source];
-      if (!scraper) return;
+  // Run scraper sources sequentially to prevent browser context overload and CPU spikes
+  for (const source of sources) {
+    const scraper = scraperRegistry[source];
+    if (!scraper) continue;
 
-      try {
-        const results = await scraper.scrape(query);
-        allResults.push(...results);
-      } catch (err) {
-        const msg = `${source}: ${String(err)}`;
-        errors.push(msg);
-        logger.error("[API] Scraper failed", { source, error: String(err) });
-      }
-    })
-  );
+    try {
+      logger.info(`[API] Executing scraper for ${source}...`);
+      const results = await scraper.scrape(query);
+      allResults.push(...results);
+      logger.info(`[API] Finished ${source}: ${results.length} results`);
+    } catch (err) {
+      const msg = `${source}: ${String(err)}`;
+      errors.push(msg);
+      logger.error("[API] Scraper failed", { source, error: String(err) });
+    }
+  }
 
   const duration = Date.now() - startTime;
 
