@@ -7,6 +7,7 @@ import {
   parseWorkplaceType,
   cleanDescription,
   randomDelay,
+  normalizeKeyword,
 } from "../utils/helpers.js";
 import { logger } from "../utils/logger.js";
 
@@ -22,7 +23,9 @@ export class JobStreetScraper implements IScraper {
   private readonly BASE_URL = "https://id.jobstreet.com";
 
   async scrape(query: ScrapeQuery): Promise<JobResult[]> {
-    const { keyword, location = "indonesia", page = 1, limit = 20 } = query;
+    const rawKeyword = query.keyword;
+    const keyword = normalizeKeyword(rawKeyword);
+    const { location = "indonesia", page = 1, limit = 20 } = query;
 
     const slug = keyword.toLowerCase().trim().replace(/\s+/g, "-");
     const isGenericLocation = !location || location.toLowerCase() === "indonesia";
@@ -31,7 +34,7 @@ export class JobStreetScraper implements IScraper {
 
     const url = `${this.BASE_URL}/id/${slug}-jobs${locSlug}${pageParam}`;
 
-    logger.info("[JobStreet] Navigating to search URL", { keyword, location, page, url });
+    logger.info("[JobStreet] Navigating to search URL", { rawKeyword, keyword, location, page, url });
 
     const browser = await getBrowser();
     const context = await createContext(browser);

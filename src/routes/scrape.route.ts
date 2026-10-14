@@ -3,6 +3,7 @@ import { Router, Request, Response } from "express";
 import { v4 as uuidv4 } from "uuid";
 import { scraperRegistry } from "../scrapers/registry.js";
 import { scrapeQueue } from "../queue/scrape-queue.js";
+import { normalizeKeyword } from "../utils/helpers.js";
 import type { ScrapeQuery, ScraperSource, ScrapeSuccessResponse, ScrapeErrorResponse } from "../types/index.js";
 import { logger } from "../utils/logger.js";
 
@@ -14,7 +15,8 @@ const scrapeConcurrency = pLimit(1);
 // ─── Validation helper ────────────────────────────────────────────────────────
 
 function parseQuery(req: Request): { query: ScrapeQuery; sources: ScraperSource[] } {
-  const keyword = String(req.query["keyword"] ?? "").trim();
+  const rawKeyword = String(req.query["keyword"] ?? "").trim();
+  const keyword = normalizeKeyword(rawKeyword);
   const location = String(req.query["location"] ?? "Indonesia").trim();
   const page = Math.max(1, parseInt(String(req.query["page"] ?? "1"), 10));
   const limit = Math.min(50, Math.max(1, parseInt(String(req.query["limit"] ?? "20"), 10)));
@@ -149,7 +151,8 @@ scrapeRouter.get("/:source", async (req: Request, res: Response) => {
  */
 scrapeRouter.post("/queue", async (req: Request, res: Response) => {
   const body = req.body as Record<string, unknown>;
-  const keyword = String(body["keyword"] ?? "").trim();
+  const rawKeyword = String(body["keyword"] ?? "").trim();
+  const keyword = normalizeKeyword(rawKeyword);
   const location = String(body["location"] ?? "Indonesia").trim();
   const page = parseInt(String(body["page"] ?? "1"), 10);
   const limit = Math.min(50, parseInt(String(body["limit"] ?? "20"), 10));

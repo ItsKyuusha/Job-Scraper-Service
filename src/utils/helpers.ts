@@ -9,6 +9,59 @@ export function newJobId(): string {
 }
 
 /**
+ * Normalize and space compound keywords often typed without spaces.
+ * E.g.: "systemanalyst" -> "system analyst", "frontenddeveloper" -> "frontend developer",
+ * "projectmanager" -> "project manager", "dataanalyst" -> "data analyst".
+ */
+export function normalizeKeyword(raw: string): string {
+  let kw = raw.trim();
+  if (!kw) return "";
+
+  // Common compound job terms mapping
+  const compoundMap: Record<string, string> = {
+    systemanalyst: "system analyst",
+    systemsanalyst: "systems analyst",
+    businessanalyst: "business analyst",
+    dataanalyst: "data analyst",
+    datascience: "data science",
+    datascientist: "data scientist",
+    frontenddeveloper: "frontend developer",
+    backenddeveloper: "backend developer",
+    fullstackdeveloper: "fullstack developer",
+    softwareengineer: "software engineer",
+    softwaredirector: "software director",
+    softwaredeveloper: "software developer",
+    productmanager: "product manager",
+    projectmanager: "project manager",
+    scrummaster: "scrum master",
+    devopsengineer: "devops engineer",
+    qaengineer: "qa engineer",
+    qualityassurance: "quality assurance",
+    uidesigner: "ui designer",
+    uxdesigner: "ux designer",
+    uiux: "ui ux",
+    uiuxdesigner: "ui ux designer",
+    webdeveloper: "web developer",
+    mobiledeveloper: "mobile developer",
+    networkengineer: "network engineer",
+    securityanalyst: "security analyst",
+    cybersecurity: "cyber security",
+    itstaff: "it staff",
+    itsupport: "it support",
+  };
+
+  const lower = kw.toLowerCase().replace(/[-_]+/g, "");
+  if (compoundMap[lower]) {
+    return compoundMap[lower];
+  }
+
+  // Split CamelCase if present (e.g. SystemAnalyst -> System Analyst)
+  kw = kw.replace(/([a-z])([A-Z])/g, "$1 $2");
+
+  return kw;
+}
+
+/**
  * Normalize raw salary string into min/max numeric values (IDR).
  * Handles formats like:
  *   "Rp 8.000.000 - Rp 12.000.000"

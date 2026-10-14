@@ -7,6 +7,7 @@ import {
   parseSalary,
   cleanDescription,
   randomDelay,
+  normalizeKeyword,
 } from "../utils/helpers.js";
 import { logger } from "../utils/logger.js";
 
@@ -21,10 +22,12 @@ export class ThreadsScraper implements IScraper {
   source = "threads" as const;
 
   async scrape(query: ScrapeQuery): Promise<JobResult[]> {
-    const { keyword, page = 1, limit = 20 } = query;
+    const rawKeyword = query.keyword;
+    const keyword = normalizeKeyword(rawKeyword);
+    const { page = 1, limit = 20 } = query;
 
     const tags = this.selectTags(keyword);
-    logger.info("[Threads] Starting tag scrape", { keyword, tags, page });
+    logger.info("[Threads] Starting tag scrape", { rawKeyword, keyword, tags, page });
 
     const browser = await getBrowser();
     const context = await createContext(browser);

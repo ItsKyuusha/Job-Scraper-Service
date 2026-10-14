@@ -1,6 +1,6 @@
 import type { IScraper, ScrapeQuery, JobResult } from "../types/index.js";
 import { getBrowser, createContext, createPage } from "../utils/browser.js";
-import { makeJobResult, parseEmploymentType, parseWorkplaceType, cleanDescription, randomDelay } from "../utils/helpers.js";
+import { makeJobResult, parseEmploymentType, parseWorkplaceType, cleanDescription, randomDelay, normalizeKeyword } from "../utils/helpers.js";
 import { logger } from "../utils/logger.js";
 
 /**
@@ -13,7 +13,9 @@ export class LinkedInScraper implements IScraper {
   source = "linkedin" as const;
 
   async scrape(query: ScrapeQuery): Promise<JobResult[]> {
-    const { keyword, location = "Indonesia", page = 1, limit = 20 } = query;
+    const rawKeyword = query.keyword;
+    const keyword = normalizeKeyword(rawKeyword);
+    const { location = "Indonesia", page = 1, limit = 20 } = query;
     const start = (page - 1) * 25;
 
     const url = new URL("https://www.linkedin.com/jobs/search/");
@@ -23,7 +25,7 @@ export class LinkedInScraper implements IScraper {
     url.searchParams.set("f_TPR", "r2592000"); // last 30 days
     url.searchParams.set("sortBy", "R");
 
-    logger.info("[LinkedIn] Starting scrape", { keyword, location, page, url: url.toString() });
+    logger.info("[LinkedIn] Starting scrape", { rawKeyword, keyword, location, page, url: url.toString() });
 
     const browser = await getBrowser();
     const context = await createContext(browser);

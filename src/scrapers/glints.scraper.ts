@@ -7,6 +7,7 @@ import {
   parseSalary,
   cleanDescription,
   randomDelay,
+  normalizeKeyword,
 } from "../utils/helpers.js";
 import { logger } from "../utils/logger.js";
 
@@ -21,7 +22,9 @@ export class GlintsScraper implements IScraper {
   source = "glints" as const;
 
   async scrape(query: ScrapeQuery): Promise<JobResult[]> {
-    const { keyword, location, page = 1, limit = 20 } = query;
+    const rawKeyword = query.keyword;
+    const keyword = normalizeKeyword(rawKeyword);
+    const { location, page = 1, limit = 20 } = query;
     const cityName = this.mapLocation(location ?? "");
 
     const searchUrl =
@@ -29,7 +32,7 @@ export class GlintsScraper implements IScraper {
       `?keyword=${encodeURIComponent(keyword)}` +
       (cityName ? `&locationName=${encodeURIComponent(cityName)}` : "");
 
-    logger.info("[Glints] Starting scrape", { keyword, location, page, url: searchUrl });
+    logger.info("[Glints] Starting scrape", { rawKeyword, keyword, location, page, url: searchUrl });
 
     const browser = await getBrowser();
     const context = await createContext(browser);
