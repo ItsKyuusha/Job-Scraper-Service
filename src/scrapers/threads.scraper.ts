@@ -13,17 +13,11 @@ import { logger } from "../utils/logger.js";
 /**
  * Threads Job Scraper
  *
- * Threads (`threads.com`) public tag pages (`/tag/{hashtag}`) are fully
- * accessible without login, containing live threads with job openings.
+ * Threads (`threads.com`) tag pages (e.g. `/tag/loker`, `/tag/lowongankerja`)
+ * are open publicly and show active community job listings.
  *
- * We scrape relevant Indonesian job tags:
- *   - /tag/loker
- *   - /tag/lokerit (for IT / engineering)
- *   - /tag/lowongankerja
- *   - /tag/lokerjakarta, /tag/lokerremote, etc.
- *
- * Then we filter by the user's requested keyword (e.g. "frontend", "backend")
- * and extract structured job fields using lightweight regex NLP.
+ * Each post has a permalink matching `/post/` and text content detailing
+ * the vacancy, requirements, and contact/DM info.
  */
 export class ThreadsScraper implements IScraper {
   source = "threads" as const;
@@ -31,7 +25,6 @@ export class ThreadsScraper implements IScraper {
   async scrape(query: ScrapeQuery): Promise<JobResult[]> {
     const { keyword, page = 1, limit = 20 } = query;
 
-    // Pick target tags based on keyword
     const tags = this.selectTags(keyword);
     logger.info("[Threads] Starting public tag scrape", { keyword, tags, page });
 
@@ -40,71 +33,81 @@ export class ThreadsScraper implements IScraper {
     const browserPage = await createPage(context, { blockResources: false });
 
     const results: JobResult[] = [];
-    const seenTexts = new Set<string>();
+    const seenUrls = new Set<string>();
 
     try {
       for (const tag of tags) {
         if (results.length >= limit) break;
 
         const url = `https://www.threads.com/tag/${tag}`;
-        logger.info("[Threads] Visiting tag page", { tag, url });
+        logger.info("[Threads] Navigating to tag page", { tag, url });
 
         try {
           await browserPage.goto(url, { waitUntil: "domcontentloaded", timeout: 25000 });
           await randomDelay(3000, 4500);
 
-          // Scroll to load more dynamically rendered posts
-          for (let i = 0; i < Math.min(page, 3); i++) {
-            await browserPage.evaluate(() => window.scrollBy(0, 1000));
+          // Scroll down to load more dynamic threads
+          const scrollCount = Math.min(Math.max(page * 2, 2), 5);
+          for (let i = 0; i < scrollCount; i++) {
+            await browserPage.evaluate(() => window.scrollBy(0, 1200));
             await randomDelay(1200, 2000);
           }
 
-          // Extract post elements
-          type RawPost = {
+          type ScrapedPost = {
+            postUrl: string;
             author: string;
             text: string;
-            href: string;
           };
 
-          const rawPosts: RawPost[] = await browserPage.evaluate(() => {
-            const items: { author: string; text: string; href: string }[] = [];
-            
-            // Threads posts are typically wrapped in articles or pressable containers
-            const containers = Array.from(
-              document.querySelectorAll('div[data-pressable-container], article, div[dir="auto"]')
-            ) as HTMLElement[];
+          const posts: ScrapedPost[] = await browserPage.evaluate(() => {
+            const items: { postUrl: string; author: string; text: string }[] = [];
+            const seen = new Set<string>();
 
-            containers.forEach((el) => {
-              const fullText = el.innerText?.trim() ?? "";
-              if (fullText.length < 30) return;
+            // Find all anchor elements linking to posts
+            const postLinks = Array.from(document.querySelectorAll('a[href*="/post/"]')) as HTMLAnchorElement[];
 
-              // Find author link
-              const authorLink = el.querySelector('a[href^="https://www.threads.com/@"], a[href^="/@"]') as HTMLAnchorElement | null;
-              const author = authorLink ? authorLink.innerText.trim() : "";
+            for (const a of postLinks) {
+              const href = a.href.split("?")[0];
+              if (!href || seen.has(href)) continue;
 
-              // Find direct link to post
-              const postLink = el.querySelector('a[href*="/post/"]') as HTMLAnchorElement | null;
-              const href = postLink ? postLink.href : (authorLink ? authorLink.href : "");
+              // Walk up parents to find the post content card
+              let container: HTMLElement | null = a.parentElement;
+              while (
+                container &&
+                container.innerText &&
+                container.innerText.length < 60 &&
+                container !== document.body
+              ) {
+                container = container.parentElement;
+              }
 
-              items.push({ author, text: fullText, href });
-            });
+              const fullText = (container?.innerText ?? a.innerText ?? "").trim();
+              if (fullText.length < 25) continue;
+
+              seen.add(href);
+
+              // Extract author username from post URL: https://www.threads.com/@username/post/xxx
+              const authorMatch = href.match(/@([^/]+)/);
+              const author = authorMatch ? `@${authorMatch[1]}` : "";
+
+              items.push({ postUrl: href, author, text: fullText });
+            }
 
             return items;
           });
 
-          logger.info("[Threads] Posts found on tag", { tag, count: rawPosts.length });
+          logger.info("[Threads] Extracted post candidates from tag", { tag, count: posts.length });
 
-          for (const post of rawPosts) {
+          for (const post of posts) {
             if (results.length >= limit) break;
+            if (seenUrls.has(post.postUrl)) continue;
 
-            const snippet = post.text.slice(0, 100);
-            if (seenTexts.has(snippet)) continue;
-            seenTexts.add(snippet);
+            // Check if post text contains relevant job opening signals
+            if (!this.isJobOpening(post.text, keyword)) continue;
 
-            // Filter: must look like a job and match keyword if keyword is specific
-            if (!this.matchesSearch(post.text, keyword)) continue;
+            seenUrls.add(post.postUrl);
 
-            const parsed = this.parseJobFromText(post.text);
+            const parsed = this.parseJobFromText(post.text, post.author);
             if (!parsed.title) continue;
 
             const salaryData = parseSalary(parsed.salaryRaw);
@@ -119,17 +122,17 @@ export class ThreadsScraper implements IScraper {
                 workplace_type: parseWorkplaceType(post.text),
                 salary_raw: parsed.salaryRaw,
                 ...salaryData,
-                source_url: post.href || url,
+                source_url: post.postUrl,
                 posted_at: null,
               })
             );
           }
         } catch (tagErr) {
-          logger.warn("[Threads] Error scraping tag", { tag, error: String(tagErr) });
+          logger.warn("[Threads] Error scraping tag page", { tag, error: String(tagErr) });
         }
       }
 
-      logger.info("[Threads] Scrape completed", { found: results.length });
+      logger.info("[Threads] Scrape completed successfully", { found: results.length });
       return results;
     } catch (err) {
       logger.error("[Threads] Scrape failed", { error: String(err) });
@@ -141,94 +144,110 @@ export class ThreadsScraper implements IScraper {
   }
 
   /**
-   * Determine whether a post is relevant to the keyword.
+   * Determine whether a post represents an actual job opportunity.
+   * If a specific keyword is supplied (e.g. "frontend"), check for it or related skills.
+   * If generic or broader query, verify it has job vacancy terminology.
    */
-  private matchesSearch(text: string, keyword: string): boolean {
+  private isJobOpening(text: string, keyword: string): boolean {
     const lower = text.toLowerCase();
     const kw = keyword.toLowerCase().trim();
 
-    // If generic search like "loker", accept all posts on the loker tag
-    if (["loker", "job", "lowongan", "kerja"].includes(kw)) {
-      return true;
-    }
+    // Exclude posts that are only job seekers asking for jobs
+    const isJobSeekerOnly =
+      /^(info loker|ada info loker|butuh loker|inpo loker|info lowker)/i.test(text.trim()) &&
+      text.length < 80;
 
-    // Check keyword presence
-    if (lower.includes(kw)) return true;
+    if (isJobSeekerOnly) return false;
 
-    // Related technology synonyms
-    if (kw.includes("frontend") && (lower.includes("react") || lower.includes("vue") || lower.includes("web developer"))) {
-      return true;
-    }
-    if (kw.includes("backend") && (lower.includes("node") || lower.includes("golang") || lower.includes("laravel") || lower.includes("python"))) {
-      return true;
-    }
+    // Check if keyword is matched
+    const matchesKeyword =
+      ["loker", "job", "lowongan", "kerja"].includes(kw) ||
+      lower.includes(kw) ||
+      (kw.includes("frontend") && (lower.includes("react") || lower.includes("web") || lower.includes("developer") || lower.includes("programmer") || lower.includes("ui"))) ||
+      (kw.includes("backend") && (lower.includes("golang") || lower.includes("api") || lower.includes("node") || lower.includes("laravel") || lower.includes("sql"))) ||
+      (kw.includes("it") && (lower.includes("programmer") || lower.includes("developer") || lower.includes("tech") || lower.includes("software")));
 
-    return false;
+    if (!matchesKeyword) return false;
+
+    // Must have at least one vacancy or hiring signal
+    const hiringSignals = [
+      "hiring", "open recruitment", "dibutuhkan", "posisi", "kualifikasi",
+      "persyaratan", "send cv", "kirim cv", "dm us", "apply", "benefit",
+      "gaji", "salary", "full time", "part time", "magang", "intern", "staff",
+      "needed", "lowongan", "loker",
+    ];
+
+    return hiringSignals.some((sig) => lower.includes(sig));
   }
 
   /**
-   * Select best hashtag to query based on search intent.
+   * Target the most fruitful hashtags based on keyword.
    */
   private selectTags(keyword: string): string[] {
     const kw = keyword.toLowerCase();
-    const tags = ["loker"];
+    const tags = ["lowongankerja", "loker", "lokerjakarta"];
 
-    if (kw.includes("frontend") || kw.includes("backend") || kw.includes("it") || kw.includes("engineer") || kw.includes("developer")) {
-      tags.unshift("lokerit");
-    }
-    if (kw.includes("jakarta")) {
-      tags.push("lokerjakarta");
-    }
     if (kw.includes("remote") || kw.includes("wfh")) {
-      tags.push("lokerremote");
+      tags.unshift("lokerremote");
+    }
+    if (kw.includes("part time") || kw.includes("parttime")) {
+      tags.unshift("lokerparttime");
     }
 
-    tags.push("lowongankerja");
-    return Array.from(new Set(tags)).slice(0, 3);
+    return Array.from(new Set(tags));
   }
 
   /**
-   * Extract title, company, location, and salary from free-form social media post.
+   * Parse job title, company, location, and salary from free-form post text.
    */
-  private parseJobFromText(text: string): {
+  private parseJobFromText(text: string, author: string): {
     title: string;
     company: string;
     location: string | null;
     salaryRaw: string | null;
   } {
-    const lines = text.split("\n").map((l) => l.trim()).filter(Boolean);
+    const lines = text
+      .split("\n")
+      .map((l) => l.trim())
+      .filter((l) => l.length > 0 && !/^\d+$/.test(l));
 
-    // Title: first line matching job roles or hiring keywords
-    const titleLine =
-      lines.find((l) =>
-        /(engineer|developer|designer|analyst|manager|staff|officer|intern|programmer|part[\s-]?time|full[\s-]?time|admin|sales|marketing)/i.test(l)
-      ) ??
-      lines.find((l) =>
-        /^(open|hiring|lowongan|dicari|dibutuhkan|we are hiring|info loker)/i.test(l)
-      ) ??
-      lines[0] ?? "";
+    // Identify job title line
+    let titleLine = lines.find((l) =>
+      /(engineer|developer|designer|analyst|manager|staff|officer|intern|programmer|part[\s-]?timer?|full[\s-]?timer?|admin|finance|accounting|barista|cashier|sales|marketing)/i.test(l)
+    );
 
-    const title = titleLine
-      .replace(/^(open|hiring|lowongan|dicari|dibutuhkan|info loker)[:\s]*/i, "")
-      .replace(/[#@][\w]+/g, "")
+    if (!titleLine) {
+      titleLine = lines.find((l) =>
+        /^(open|hiring|lowongan|dibutuhkan|needed|dicari)/i.test(l)
+      );
+    }
+
+    if (!titleLine && lines.length > 1) {
+      titleLine = lines[1]; // Often line 0 is author or timestamp
+    }
+
+    const title = (titleLine ?? lines[0] ?? "Lowongan Kerja")
+      .replace(/^(open recruitment|we are hiring|hiring|lowongan kerja|lowongan|dibutuhkan|needed|dicari)[:\s-]*/i, "")
+      .replace(/[#@][\w.]+/g, "")
+      .replace(/\s+/g, " ")
       .trim()
       .slice(0, 100);
 
-    // Company: Look for "PT", "CV", or company mentions
-    const companyMatch = text.match(/(?:PT\.?\s*|CV\.?\s*)([A-Z][A-Za-z\s&]{2,35})/);
+    // Company: Look for "PT", "CV", or company keywords
+    const companyMatch = text.match(/(?:PT\.?\s*|CV\.?\s*)([A-Z][A-Za-z0-9\s&]{2,40})/);
     const company = companyMatch
       ? companyMatch[0].replace(/^(PT\.?|CV\.?)\s*/i, "PT ").trim()
-      : "";
+      : author || "Info via Threads";
 
-    // Location: popular Indonesian cities
+    // Location: common city names
     const locMatch =
       text.match(/(?:lokasi|location|area|domisili)[\s:]+([A-Za-z\s,]{3,30})/i) ??
-      text.match(/\b(Jakarta|Bandung|Surabaya|Bali|Yogyakarta|Jogja|Semarang|Medan|Batam|Bekasi|Tangerang|Depok|Bogor|Remote|WFH)\b/i);
+      text.match(/\b(Jakarta|Bandung|Surabaya|Bali|Yogyakarta|Jogja|Semarang|Medan|Batam|Bekasi|Tangerang|Depok|Bogor|Solo|Tegal|Malang|Remote|WFH)\b/i);
     const location = locMatch ? (locMatch[1] ?? locMatch[0]).trim() : null;
 
     // Salary: Indonesian currency pattern
     const salMatch = text.match(
-      /(Rp\.?\s?[\d.,]+\s?[-–]\s?Rp\.?\s?[\d.,]+|[\d.,]+\s?jt|gaji[\s:]+[\d., Rp]+)/i
+      /(Rp\.?\s?[\d.,]+\s?[-–]\s?Rp\.?\s?[\d.,]+|[\d.,]+\s?jt|gaji[\s:]+[\d., Rp]+|salary[\s:]+[\d.,\s\w]+)/i
     );
     const salaryRaw = salMatch ? salMatch[0].trim() : null;
 
