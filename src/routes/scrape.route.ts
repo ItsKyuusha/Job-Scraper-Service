@@ -4,7 +4,14 @@ import { v4 as uuidv4 } from "uuid";
 import { scraperRegistry } from "../scrapers/registry.js";
 import { scrapeQueue } from "../queue/scrape-queue.js";
 import { normalizeKeyword } from "../utils/helpers.js";
-import type { ScrapeQuery, ScraperSource, ScrapeSuccessResponse, ScrapeErrorResponse } from "../types/index.js";
+import {
+  type ScrapeQuery,
+  type ScraperSource,
+  type ScraperCategory,
+  type ScrapeSuccessResponse,
+  type ScrapeErrorResponse,
+  CATEGORY_SOURCES,
+} from "../types/index.js";
 import { logger } from "../utils/logger.js";
 
 export const scrapeRouter = Router();
@@ -90,6 +97,105 @@ scrapeRouter.get("/", async (req: Request, res: Response) => {
   };
 
   res.json(successRes);
+});
+
+// ─── Helper for category scraping ─────────────────────────────────────────────
+async function handleCategoryScrape(
+  category: ScraperCategory,
+  req: Request,
+  res: Response
+) {
+  const { query, sources: requestedSources } = parseQuery(req);
+
+  if (!query.keyword) {
+    res.status(400).json({ success: false, error: "Parameter 'keyword' wajib diisi." });
+    return;
+  }
+
+  // Filter sources only belonging to this category
+  const allowedSources = CATEGORY_SOURCES[category];
+  const activeSources = requestedSources.filter((s) => allowedSources.includes(s));
+  const finalSources = activeSources.length > 0 ? activeSources : allowedSources;
+
+  const startTime = Date.now();
+  logger.info(`[API] Category scrape (${category})`, { query, sources: finalSources });
+
+  const allResults: ScrapeSuccessResponse["results"] = [];
+  const errors: string[] = [];
+
+  for (const source of finalSources) {
+    const scraper = scraperRegistry[source];
+    if (!scraper) continue;
+
+    try {
+      logger.info(`[API] Executing ${source} for category ${category}...`);
+      const results = await scraper.scrape(query);
+      allResults.push(...results);
+      logger.info(`[API] Finished ${source}: ${results.length} results`);
+    } catch (err) {
+      const msg = `${source}: ${String(err)}`;
+      errors.push(msg);
+      logger.error(`[API] Scraper failed (${source})`, { error: String(err) });
+    }
+  }
+
+  const duration = Date.now() - startTime;
+
+  if (allResults.length === 0 && errors.length > 0) {
+    const errRes: ScrapeErrorResponse = {
+      success: false,
+      source: "multi",
+      error: `Semua sumber ${category} gagal di-scrape.`,
+      detail: errors.join(" | "),
+    };
+    res.status(502).json(errRes);
+    return;
+  }
+
+  const successRes: ScrapeSuccessResponse = {
+    success: true,
+    source: "multi",
+    query,
+    total: allResults.length,
+    results: allResults,
+    scraped_at: new Date().toISOString(),
+    duration_ms: duration,
+  };
+
+  res.json(successRes);
+}
+
+// ─── GET /api/scrape/portals ──────────────────────────────────────────────────
+/**
+ * Scrape formal job boards only (JobStreet, Glints).
+ */
+scrapeRouter.get("/portals", async (req: Request, res: Response) => {
+  await handleCategoryScrape("portals", req, res);
+});
+
+// ─── GET /api/scrape/social ───────────────────────────────────────────────────
+/**
+ * Scrape social media & community feeds only (Threads, LinkedIn).
+ */
+scrapeRouter.get("/social", async (req: Request, res: Response) => {
+  await handleCategoryScrape("social", req, res);
+});
+
+// ─── GET /api/scrape/category/:category ───────────────────────────────────────
+/**
+ * Dynamic category scrape.
+ * Param :category: "portals" | "social"
+ */
+scrapeRouter.get("/category/:category", async (req: Request, res: Response) => {
+  const category = req.params["category"] as ScraperCategory;
+  if (!["portals", "social"].includes(category)) {
+    res.status(404).json({
+      success: false,
+      error: `Kategori '${category}' tidak dikenali. Pilihan: portals, social`,
+    });
+    return;
+  }
+  await handleCategoryScrape(category, req, res);
 });
 
 // ─── GET /api/scrape/:source ──────────────────────────────────────────────────

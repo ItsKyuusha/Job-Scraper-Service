@@ -2,6 +2,13 @@
 
 export type ScraperSource = "linkedin" | "jobstreet" | "glints" | "threads";
 
+export type ScraperCategory = "portals" | "social";
+
+export const CATEGORY_SOURCES: Record<ScraperCategory, ScraperSource[]> = {
+  portals: ["jobstreet", "glints"],
+  social: ["threads", "linkedin"],
+};
+
 export type EmploymentType =
   | "full_time"
   | "part_time"

@@ -43,6 +43,12 @@ app.get("/", (_req, res) => {
     docs: {
       "GET /api/scrape":
         "Scrape all sources. Params: keyword, location, sources, page, limit",
+      "GET /api/scrape/portals":
+        "Scrape formal job portals only (JobStreet, Glints)",
+      "GET /api/scrape/social":
+        "Scrape social media & community feeds only (Threads, LinkedIn)",
+      "GET /api/scrape/category/:cat":
+        "Scrape by category (portals | social)",
       "GET /api/scrape/:source":
         "Scrape specific source (linkedin | jobstreet | glints | threads)",
       "POST /api/scrape/queue":
@@ -50,6 +56,10 @@ app.get("/", (_req, res) => {
       "GET /api/queue":        "List all queued/completed jobs",
       "GET /api/queue/:id":    "Get job status and results",
       "DELETE /api/queue/:id": "Remove a completed job",
+    },
+    categories: {
+      portals: ["jobstreet", "glints"],
+      social: ["threads", "linkedin"],
     },
     sources: ["linkedin", "jobstreet", "glints", "threads"],
     timestamp: new Date().toISOString(),
