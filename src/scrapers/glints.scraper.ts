@@ -1,170 +1,179 @@
-import axios from "axios";
 import type { IScraper, ScrapeQuery, JobResult } from "../types/index.js";
-import { makeJobResult, parseSalary, parseEmploymentType, parseWorkplaceType, cleanDescription, randomDelay } from "../utils/helpers.js";
+import { getBrowser, createContext, createPage } from "../utils/browser.js";
+import { makeJobResult, parseEmploymentType, parseWorkplaceType, cleanDescription, randomDelay } from "../utils/helpers.js";
 import { logger } from "../utils/logger.js";
 
 /**
- * Glints Indonesia Scraper
+ * Glints Indonesia Scraper — Playwright + Network Intercept
  *
- * Glints exposes a public GraphQL API that we can query directly.
- * This avoids needing a headless browser and is significantly faster.
+ * Glints blocks direct Axios requests (403). Strategy:
+ * 1. Open Glints job search page with Playwright (real browser session)
+ * 2. Intercept the outgoing GraphQL API call that Glints makes internally
+ * 3. Capture the JSON response from that network request
+ * 4. Parse and return structured JobResult[]
  *
- * Endpoint: https://glints.com/api/graphql
+ * This avoids the 403 because the request originates from a real browser
+ * with proper cookies, Referer, and Origin headers set automatically.
  */
 export class GlintsScraper implements IScraper {
   source = "glints" as const;
 
-  private readonly GRAPHQL_ENDPOINT = "https://glints.com/api/graphql";
-
-  private readonly HEADERS = {
-    "User-Agent":
-      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    "Content-Type": "application/json",
-    "Origin": "https://glints.com",
-    "Referer": "https://glints.com/id/opportunities/jobs/explore",
-    "Accept": "application/json",
-    "Accept-Language": "id-ID,id;q=0.9",
-  };
-
   async scrape(query: ScrapeQuery): Promise<JobResult[]> {
     const { keyword, location, page = 1, limit = 20 } = query;
+    const cityName = this.mapLocation(location ?? "");
     const offset = (page - 1) * limit;
 
-    // Build search filters for Glints location mapping
-    const countryCode = "ID";
-    const cityName = this.mapLocation(location ?? "");
+    const searchUrl =
+      `https://glints.com/id/opportunities/jobs/explore` +
+      `?keyword=${encodeURIComponent(keyword)}` +
+      (cityName ? `&locationName=${encodeURIComponent(cityName)}` : "");
 
-    logger.info("[Glints] Starting GraphQL scrape", { keyword, location, page });
+    logger.info("[Glints] Starting Playwright intercept scrape", { keyword, location, page });
 
-    const gqlQuery = {
-      operationName: "searchJobsV4",
-      variables: {
-        data: {
-          SearchTerm: keyword,
-          CountryCodes: [countryCode],
-          LocationNames: cityName ? [cityName] : [],
-          first: limit,
-          offset,
-          includeExternalJobs: true,
-        },
-      },
-      query: `
-        query searchJobsV4($data: UnifiedSearchJobsInput!) {
-          searchJobsV4(data: $data) {
-            jobsInSearch {
-              pageInfo { total hasNextPage }
-              jobs {
-                id title salaryEstimate cityName countryCode
-                status isActive createdAt updatedAt
-                applicationDeadline
-                salaries { salaryType currency minAmount maxAmount }
-                WorkArrangementOptions { workArrangementOption }
-                isRemote
-                jobCategories { name }
-                type
-                salary
-                company { name logo }
-                links { url }
-                shortDescription
-                location { city { name } }
-              }
-            }
-          }
+    const browser = await getBrowser();
+    const context = await createContext(browser);
+    const browserPage = await createPage(context);
+
+    // Collected GraphQL response data
+    type GlintsJob = Record<string, unknown>;
+    let interceptedJobs: GlintsJob[] = [];
+
+    // Set up network intercept BEFORE navigation
+    browserPage.on("response", async (response) => {
+      const url = response.url();
+      if (!url.includes("glints.com/api/graphql")) return;
+      if (response.status() !== 200) return;
+
+      try {
+        const json = await response.json() as Record<string, unknown>;
+        const jobs =
+          (json?.data as Record<string, unknown>)
+            ?.searchJobsV4 as Record<string, unknown> | undefined;
+        const jobList = (jobs?.jobsInSearch as Record<string, unknown>)?.jobs as GlintsJob[] | undefined;
+        if (Array.isArray(jobList) && jobList.length > 0) {
+          interceptedJobs = [...interceptedJobs, ...jobList];
+          logger.debug("[Glints] Intercepted GraphQL response", { count: jobList.length });
         }
-      `,
-    };
+      } catch {
+        // Non-JSON response, ignore
+      }
+    });
 
     try {
-      await randomDelay(500, 1500);
-      const res = await axios.post(this.GRAPHQL_ENDPOINT, gqlQuery, {
-        headers: this.HEADERS,
-        timeout: 20000,
-      });
+      await browserPage.goto(searchUrl, { waitUntil: "domcontentloaded" });
+      await randomDelay(2000, 3500);
 
-      type GlintsJob = Record<string, unknown>;
-      type GlintsData = {
-        data?: {
-          searchJobsV4?: {
-            jobsInSearch?: {
-              jobs?: GlintsJob[];
-            };
-          };
-        };
-        errors?: unknown[];
-      };
+      // Wait for job cards to appear — triggers the internal GraphQL call
+      await browserPage
+        .waitForSelector("[data-cy='job-card-with-track']", { timeout: 15000 })
+        .catch(() =>
+          browserPage.waitForSelector("[class*='JobCardStyles']", { timeout: 5000 }).catch(() => null)
+        );
 
-      const responseData = res.data as GlintsData;
+      // Give extra time for all network requests to settle
+      await randomDelay(1500, 2500);
 
-      if (responseData.errors) {
-        logger.warn("[Glints] GraphQL returned errors", { errors: responseData.errors });
+      // If intercept got data, use it
+      if (interceptedJobs.length > 0) {
+        logger.info("[Glints] Using intercepted GraphQL data", { total: interceptedJobs.length });
+        return this.parseJobList(interceptedJobs.slice(offset, offset + limit), location ?? "Indonesia");
       }
 
-      const jobs = responseData.data?.searchJobsV4?.jobsInSearch?.jobs ?? [];
-
-      if (jobs.length === 0) {
-        logger.warn("[Glints] No jobs returned from GraphQL");
-        return [];
-      }
-
-      const results = jobs.slice(0, limit).map((job): JobResult => {
-        const salaries = (job["salaries"] as Record<string, unknown>[] | null) ?? [];
-        const salaryObj = salaries[0] ?? {};
-        const salaryMin = Number(salaryObj["minAmount"]) || null;
-        const salaryMax = Number(salaryObj["maxAmount"]) || null;
-        const currency = String(salaryObj["currency"] ?? "IDR");
-
-        const rawSalary =
-          salaryMin && salaryMax
-            ? `${currency} ${salaryMin.toLocaleString()} - ${salaryMax.toLocaleString()}`
-            : (job["salary"] as string | null);
-
-        const company = job["company"] as Record<string, unknown>;
-        const location_ = (job["location"] as Record<string, unknown>) ?? {};
-        const city = (location_["city"] as Record<string, unknown>) ?? {};
-
-        const workArr = (job["WorkArrangementOptions"] as Record<string, unknown>[] | null) ?? [];
-        const workType = workArr.map((w) => String(w["workArrangementOption"])).join(" ");
-
-        const jobUrl = (job["links"] as Record<string, unknown>[])?.[0]?.["url"] as string | null
-          ?? `https://glints.com/id/opportunities/jobs/${job["id"]}`;
-
-        return makeJobResult("glints", {
-          title: String(job["title"] ?? ""),
-          company: String(company?.["name"] ?? ""),
-          location: String(city?.["name"] ?? job["cityName"] ?? location ?? "Indonesia"),
-          description: cleanDescription(String(job["shortDescription"] ?? "")),
-          employment_type: parseEmploymentType(String(job["type"] ?? "")),
-          workplace_type: job["isRemote"] ? "remote" : parseWorkplaceType(workType),
-          salary_raw: rawSalary,
-          salary_min: salaryMin,
-          salary_max: salaryMax,
-          currency,
-          source_url: jobUrl,
-          posted_at: (job["createdAt"] as string | null) ?? null,
-        });
-      });
-
-      logger.info("[Glints] Scrape completed", { found: results.length });
-      return results;
+      // Fallback: parse DOM directly
+      logger.warn("[Glints] GraphQL intercept got no data, falling back to DOM parse");
+      return await this.parseFromDom(browserPage, limit, location ?? "Indonesia", keyword);
     } catch (err) {
       logger.error("[Glints] Scrape failed", { error: String(err) });
       throw err;
+    } finally {
+      await browserPage.close();
+      await context.close();
     }
   }
 
-  /** Map generic location strings to Glints city names */
+  private parseJobList(jobs: Record<string, unknown>[], fallbackLocation: string): JobResult[] {
+    return jobs.map((job) => {
+      const salaries = (job["salaries"] as Record<string, unknown>[] | null) ?? [];
+      const salaryObj = salaries[0] ?? {};
+      const salaryMin = Number(salaryObj["minAmount"]) || null;
+      const salaryMax = Number(salaryObj["maxAmount"]) || null;
+      const currency = String(salaryObj["currency"] ?? "IDR");
+
+      const rawSalary =
+        salaryMin && salaryMax
+          ? `${currency} ${salaryMin.toLocaleString()} - ${salaryMax.toLocaleString()}`
+          : null;
+
+      const company = job["company"] as Record<string, unknown>;
+      const locationObj = (job["location"] as Record<string, unknown>) ?? {};
+      const city = (locationObj["city"] as Record<string, unknown>) ?? {};
+      const workArr = (job["WorkArrangementOptions"] as Record<string, unknown>[] | null) ?? [];
+      const workType = workArr.map((w) => String(w["workArrangementOption"])).join(" ");
+      const jobId = String(job["id"] ?? "");
+
+      return makeJobResult("glints", {
+        title: String(job["title"] ?? ""),
+        company: String(company?.["name"] ?? ""),
+        location: String(city?.["name"] ?? job["cityName"] ?? fallbackLocation),
+        description: cleanDescription(String(job["shortDescription"] ?? "")),
+        employment_type: parseEmploymentType(String(job["type"] ?? "")),
+        workplace_type: job["isRemote"] ? "remote" : parseWorkplaceType(workType),
+        salary_raw: rawSalary,
+        salary_min: salaryMin,
+        salary_max: salaryMax,
+        currency,
+        source_url: `https://glints.com/id/opportunities/jobs/${jobId}`,
+        posted_at: (job["createdAt"] as string | null) ?? null,
+      });
+    });
+  }
+
+  private async parseFromDom(
+    page: import("playwright").Page,
+    limit: number,
+    fallbackLocation: string,
+    keyword: string
+  ): Promise<JobResult[]> {
+    // Scrape job cards from rendered DOM as last resort
+    const cards = await page.$$eval(
+      "[data-cy='job-card-with-track'], [class*='JobCardStyles__JobcardWrapper']",
+      (els) =>
+        els.slice(0, 30).map((el) => ({
+          title: el.querySelector("[data-cy='job-card-title']")?.textContent?.trim() ?? "",
+          company: el.querySelector("[data-cy='job-card-company-name']")?.textContent?.trim() ?? "",
+          location: el.querySelector("[data-cy='job-card-location']")?.textContent?.trim() ?? "",
+          salary: el.querySelector("[data-cy='job-card-salary']")?.textContent?.trim() ?? "",
+          url: (el.querySelector("a[href*='/opportunities/jobs/']") as HTMLAnchorElement)?.href ?? "",
+          type: el.querySelector("[data-cy='job-card-type']")?.textContent?.trim() ?? "",
+        }))
+    ).catch(() => [] as { title: string; company: string; location: string; salary: string; url: string; type: string }[]);
+
+    return cards
+      .filter((c) => c.title && c.company)
+      .slice(0, limit)
+      .map((c) =>
+        makeJobResult("glints", {
+          title: c.title,
+          company: c.company,
+          location: c.location || fallbackLocation,
+          description: null,
+          employment_type: parseEmploymentType(c.type),
+          workplace_type: parseWorkplaceType(c.location + " " + c.type),
+          salary_raw: c.salary || null,
+          salary_min: null,
+          salary_max: null,
+          source_url: c.url || `https://glints.com/id/opportunities/jobs/explore?keyword=${encodeURIComponent(keyword)}`,
+          posted_at: null,
+        })
+      );
+  }
+
   private mapLocation(location: string): string {
     const lower = location.toLowerCase();
     const map: Record<string, string> = {
-      jakarta: "Jakarta",
-      bandung: "Bandung",
-      surabaya: "Surabaya",
-      yogyakarta: "Yogyakarta",
-      bali: "Bali",
-      medan: "Medan",
-      semarang: "Semarang",
-      remote: "",
-      indonesia: "",
+      jakarta: "Jakarta", bandung: "Bandung", surabaya: "Surabaya",
+      yogyakarta: "Yogyakarta", bali: "Bali", medan: "Medan",
+      semarang: "Semarang", remote: "", indonesia: "",
     };
     for (const [key, val] of Object.entries(map)) {
       if (lower.includes(key)) return val;
