@@ -94,10 +94,14 @@ export async function createPage(context: BrowserContext, opts?: PageOptions): P
   page.setDefaultTimeout(timeout);
   page.setDefaultNavigationTimeout(timeout);
 
-  if (opts?.blockResources) {
+  // By default block heavy binary media assets (images, fonts, stylesheets, media)
+  // to drastically speed up network transfers while keeping DOM & JavaScript execution intact.
+  const shouldBlock = opts?.blockResources ?? true;
+  if (shouldBlock) {
     await page.route("**/*", (route) => {
-      const blocked = ["image", "media"];
-      if (blocked.includes(route.request().resourceType())) {
+      const type = route.request().resourceType();
+      // Block images, videos, audio, and font downloads which are not needed for text extraction
+      if (["image", "media", "font"].includes(type)) {
         route.abort();
       } else {
         route.continue();

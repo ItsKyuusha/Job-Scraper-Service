@@ -1,6 +1,6 @@
 import type { IScraper, ScrapeQuery, JobResult } from "../types/index.js";
 import { getBrowser, createContext, createPage } from "../utils/browser.js";
-import { makeJobResult, parseEmploymentType, parseWorkplaceType, cleanDescription, randomDelay, normalizeKeyword } from "../utils/helpers.js";
+import { makeJobResult, parseEmploymentType, parseWorkplaceType, cleanDescription, randomDelay, normalizeKeyword, parsePostedAt } from "../utils/helpers.js";
 import { logger } from "../utils/logger.js";
 
 /**
@@ -29,16 +29,16 @@ export class LinkedInScraper implements IScraper {
 
     const browser = await getBrowser();
     const context = await createContext(browser);
-    const browserPage = await createPage(context, { blockResources: false });
+    const browserPage = await createPage(context, { blockResources: true });
 
     try {
-      await browserPage.goto(url.toString(), { waitUntil: "domcontentloaded", timeout: 30000 });
-      await randomDelay(2500, 4000);
+      await browserPage.goto(url.toString(), { waitUntil: "domcontentloaded", timeout: 20000 });
+      await randomDelay(1200, 2000);
 
       // Wait for any standard LinkedIn job card container
       await browserPage
         .waitForSelector("ul.jobs-search__results-list, div.base-serp-page__content, div.base-search-card", {
-          timeout: 15000,
+          timeout: 8000,
         })
         .catch(() => {
           logger.warn("[LinkedIn] Job list selector timeout, evaluating available DOM");
@@ -46,7 +46,7 @@ export class LinkedInScraper implements IScraper {
 
       // Gentle scroll to ensure initial cards render
       await browserPage.evaluate(() => window.scrollBy(0, 600));
-      await randomDelay(1000, 1500);
+      await randomDelay(600, 1000);
 
       type RawLinkedInCard = {
         title: string;
@@ -84,9 +84,16 @@ export class LinkedInScraper implements IScraper {
       logger.info("[LinkedIn] Evaluated cards from page", { count: rawCards.length });
 
       const results: JobResult[] = [];
+      const seenUrls = new Set<string>();
 
-      for (const card of rawCards.slice(0, limit)) {
+      for (const card of rawCards) {
+        if (results.length >= limit) break;
         if (!card.title || !card.company || !card.sourceUrl) continue;
+
+        // Normalize URL without query params to avoid duplicate cards on LinkedIn
+        const cleanUrl = card.sourceUrl.split("?")[0];
+        if (seenUrls.has(cleanUrl)) continue;
+        seenUrls.add(cleanUrl);
 
         const { salary_min, salary_max, salary_raw } = extractSalaryFromText(card.metaText);
 
@@ -102,7 +109,7 @@ export class LinkedInScraper implements IScraper {
             salary_min,
             salary_max,
             source_url: card.sourceUrl,
-            posted_at: card.postedRaw,
+            posted_at: parsePostedAt(card.postedRaw),
           })
         );
       }

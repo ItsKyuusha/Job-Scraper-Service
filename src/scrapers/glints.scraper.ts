@@ -8,6 +8,7 @@ import {
   cleanDescription,
   randomDelay,
   normalizeKeyword,
+  parsePostedAt,
 } from "../utils/helpers.js";
 import { logger } from "../utils/logger.js";
 
@@ -27,24 +28,26 @@ export class GlintsScraper implements IScraper {
     const { location, page = 1, limit = 20 } = query;
     const cityName = this.mapLocation(location ?? "");
 
+    const pageParam = page > 1 ? `&page=${page}` : "";
     const searchUrl =
       `https://glints.com/id/opportunities/jobs/explore` +
       `?keyword=${encodeURIComponent(keyword)}` +
-      (cityName ? `&locationName=${encodeURIComponent(cityName)}` : "");
+      (cityName ? `&locationName=${encodeURIComponent(cityName)}` : "") +
+      pageParam;
 
     logger.info("[Glints] Starting scrape", { rawKeyword, keyword, location, page, url: searchUrl });
 
     const browser = await getBrowser();
     const context = await createContext(browser);
-    const browserPage = await createPage(context, { blockResources: false });
+    const browserPage = await createPage(context, { blockResources: true });
 
     try {
-      await browserPage.goto(searchUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
-      await randomDelay(3000, 4500);
+      await browserPage.goto(searchUrl, { waitUntil: "domcontentloaded", timeout: 20000 });
+      await randomDelay(1200, 2000);
 
       // Scroll to trigger lazy loading of styled-component cards
       await browserPage.evaluate(() => window.scrollBy(0, 800));
-      await randomDelay(1500, 2500);
+      await randomDelay(800, 1400);
 
       type GlintsExtractedCard = {
         title: string;
@@ -142,6 +145,12 @@ export class GlintsScraper implements IScraper {
           salaryRaw?.replace(/jt/gi, "000000").replace(/rb/gi, "000") ?? null
         );
 
+        // Extract posted date from card text — Glints shows e.g. "Aktif 2 hari lalu", "Diposting 5 hari", "2d", "1 bulan lalu"
+        const dateMatch = card.cardText.match(
+          /(?:aktif|diposting|posted|updated|diperbaharui)?\s*(\d+\s*(?:hari|jam|minggu|bulan|day|days|hour|hours|week|weeks|month|months)\s*(?:yang\s+lalu|lalu|ago)?|\d+\s*[hdwm]\b)/i
+        );
+        const postedRaw = dateMatch ? dateMatch[1].trim() : null;
+
         results.push(
           makeJobResult("glints", {
             title: card.title,
@@ -159,7 +168,7 @@ export class GlintsScraper implements IScraper {
             salary_max,
             currency,
             source_url: card.href || searchUrl,
-            posted_at: null,
+            posted_at: parsePostedAt(postedRaw),
           })
         );
       }

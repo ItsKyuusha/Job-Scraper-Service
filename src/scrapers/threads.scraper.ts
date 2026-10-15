@@ -8,6 +8,7 @@ import {
   cleanDescription,
   randomDelay,
   normalizeKeyword,
+  parsePostedAt,
 } from "../utils/helpers.js";
 import { logger } from "../utils/logger.js";
 
@@ -44,23 +45,24 @@ export class ThreadsScraper implements IScraper {
         logger.info("[Threads] Loading tag page", { tag, url });
 
         try {
-          await browserPage.goto(url, { waitUntil: "domcontentloaded", timeout: 25000 });
-          await randomDelay(3000, 4500);
+          await browserPage.goto(url, { waitUntil: "domcontentloaded", timeout: 20000 });
+          await randomDelay(1500, 2500);
 
           // Scroll to load dynamic posts
-          for (let i = 0; i < Math.min(page + 2, 4); i++) {
+          for (let i = 0; i < Math.min(page + 1, 3); i++) {
             await browserPage.evaluate(() => window.scrollBy(0, 1000));
-            await randomDelay(1200, 1800);
+            await randomDelay(700, 1200);
           }
 
           type CandidatePost = {
             postUrl: string;
             author: string;
             text: string;
+            postedRaw: string | null;
           };
 
           const candidates: CandidatePost[] = await browserPage.evaluate(() => {
-            const items: { postUrl: string; author: string; text: string }[] = [];
+            const items: { postUrl: string; author: string; text: string; postedRaw: string | null }[] = [];
             const seen = new Set<string>();
 
             // Strategy: query all links that point to posts
@@ -89,7 +91,20 @@ export class ThreadsScraper implements IScraper {
               const authorMatch = href.match(/@([^/]+)/);
               const author = authorMatch ? `@${authorMatch[1]}` : "";
 
-              items.push({ postUrl: href, author, text: fullText });
+              // Extract timestamp: Threads shows relative time like "1d", "3h", "10/05/26" in post text lines
+              // Text often starts with: "@username\n1d\npost content..."
+              const lines = fullText.split("\n").map(l => l.trim()).filter(Boolean);
+              let postedRaw: string | null = null;
+              for (const line of lines.slice(0, 5)) {
+                // Short form: "1d", "3h", "2w"
+                if (/^\d+[hdwm]$/.test(line)) { postedRaw = line; break; }
+                // Date: "10/05/26", "09/28/2026"
+                if (/^\d{2}\/\d{2}\/\d{2,4}$/.test(line)) { postedRaw = line; break; }
+                // Relative: "1 hari lalu", "2 jam lalu"
+                if (/\d+\s*(hari|jam|minggu|bulan)/i.test(line) && line.length < 25) { postedRaw = line; break; }
+              }
+
+              items.push({ postUrl: href, author, text: fullText, postedRaw });
             }
 
             return items;
@@ -122,7 +137,7 @@ export class ThreadsScraper implements IScraper {
                 salary_raw: parsed.salaryRaw,
                 ...salaryData,
                 source_url: post.postUrl,
-                posted_at: null,
+                posted_at: parsePostedAt(post.postedRaw),
               })
             );
           }
@@ -250,4 +265,4 @@ export class ThreadsScraper implements IScraper {
 
     return { title: title || "Lowongan Kerja", company, location, salaryRaw };
   }
-}
+}`w `

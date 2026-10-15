@@ -3,7 +3,7 @@ import { Router, Request, Response } from "express";
 import { v4 as uuidv4 } from "uuid";
 import { scraperRegistry } from "../scrapers/registry.js";
 import { scrapeQueue } from "../queue/scrape-queue.js";
-import { normalizeKeyword } from "../utils/helpers.js";
+import { normalizeKeyword, deduplicateJobs } from "../utils/helpers.js";
 import {
   type ScrapeQuery,
   type ScraperSource,
@@ -56,26 +56,32 @@ scrapeRouter.get("/", async (req: Request, res: Response) => {
   const allResults: ScrapeSuccessResponse["results"] = [];
   const errors: string[] = [];
 
-  // Run scraper sources sequentially to prevent browser context overload and CPU spikes
-  for (const source of sources) {
-    const scraper = scraperRegistry[source];
-    if (!scraper) continue;
+  // Execute scrapers concurrently with max 2 browser sessions at a time
+  // This cuts total response duration in half without choking system RAM/CPU
+  const poolLimit = pLimit(2);
+  const tasks = sources.map((source) =>
+    poolLimit(async () => {
+      const scraper = scraperRegistry[source];
+      if (!scraper) return;
+      try {
+        logger.info(`[API] Executing scraper for ${source}...`);
+        const results = await scraper.scrape(query);
+        allResults.push(...results);
+        logger.info(`[API] Finished ${source}: ${results.length} results`);
+      } catch (err) {
+        const msg = `${source}: ${String(err)}`;
+        errors.push(msg);
+        logger.error("[API] Scraper failed", { source, error: String(err) });
+      }
+    })
+  );
 
-    try {
-      logger.info(`[API] Executing scraper for ${source}...`);
-      const results = await scraper.scrape(query);
-      allResults.push(...results);
-      logger.info(`[API] Finished ${source}: ${results.length} results`);
-    } catch (err) {
-      const msg = `${source}: ${String(err)}`;
-      errors.push(msg);
-      logger.error("[API] Scraper failed", { source, error: String(err) });
-    }
-  }
+  await Promise.all(tasks);
 
   const duration = Date.now() - startTime;
+  const uniqueResults = deduplicateJobs(allResults);
 
-  if (allResults.length === 0 && errors.length > 0) {
+  if (uniqueResults.length === 0 && errors.length > 0) {
     const errRes: ScrapeErrorResponse = {
       success: false,
       source: sources.length === 1 ? sources[0] : "multi",
@@ -90,8 +96,8 @@ scrapeRouter.get("/", async (req: Request, res: Response) => {
     success: true,
     source: sources.length === 1 ? sources[0] : "multi",
     query,
-    total: allResults.length,
-    results: allResults,
+    total: uniqueResults.length,
+    results: uniqueResults,
     scraped_at: new Date().toISOString(),
     duration_ms: duration,
   };
@@ -123,25 +129,30 @@ async function handleCategoryScrape(
   const allResults: ScrapeSuccessResponse["results"] = [];
   const errors: string[] = [];
 
-  for (const source of finalSources) {
-    const scraper = scraperRegistry[source];
-    if (!scraper) continue;
+  const poolLimit = pLimit(2);
+  const tasks = finalSources.map((source) =>
+    poolLimit(async () => {
+      const scraper = scraperRegistry[source];
+      if (!scraper) return;
+      try {
+        logger.info(`[API] Executing ${source} for category ${category}...`);
+        const results = await scraper.scrape(query);
+        allResults.push(...results);
+        logger.info(`[API] Finished ${source}: ${results.length} results`);
+      } catch (err) {
+        const msg = `${source}: ${String(err)}`;
+        errors.push(msg);
+        logger.error(`[API] Scraper failed (${source})`, { error: String(err) });
+      }
+    })
+  );
 
-    try {
-      logger.info(`[API] Executing ${source} for category ${category}...`);
-      const results = await scraper.scrape(query);
-      allResults.push(...results);
-      logger.info(`[API] Finished ${source}: ${results.length} results`);
-    } catch (err) {
-      const msg = `${source}: ${String(err)}`;
-      errors.push(msg);
-      logger.error(`[API] Scraper failed (${source})`, { error: String(err) });
-    }
-  }
+  await Promise.all(tasks);
 
   const duration = Date.now() - startTime;
+  const uniqueResults = deduplicateJobs(allResults);
 
-  if (allResults.length === 0 && errors.length > 0) {
+  if (uniqueResults.length === 0 && errors.length > 0) {
     const errRes: ScrapeErrorResponse = {
       success: false,
       source: "multi",
@@ -156,8 +167,8 @@ async function handleCategoryScrape(
     success: true,
     source: "multi",
     query,
-    total: allResults.length,
-    results: allResults,
+    total: uniqueResults.length,
+    results: uniqueResults,
     scraped_at: new Date().toISOString(),
     duration_ms: duration,
   };
@@ -227,7 +238,8 @@ scrapeRouter.get("/:source", async (req: Request, res: Response) => {
   logger.info("[API] Single-source scrape", { source, query });
 
   try {
-    const results = await scraper.scrape(query);
+    const rawResults = await scraper.scrape(query);
+    const results = deduplicateJobs(rawResults);
     const successRes: ScrapeSuccessResponse = {
       success: true,
       source,

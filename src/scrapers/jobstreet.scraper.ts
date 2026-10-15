@@ -8,6 +8,7 @@ import {
   cleanDescription,
   randomDelay,
   normalizeKeyword,
+  parsePostedAt,
 } from "../utils/helpers.js";
 import { logger } from "../utils/logger.js";
 
@@ -38,17 +39,15 @@ export class JobStreetScraper implements IScraper {
 
     const browser = await getBrowser();
     const context = await createContext(browser);
-    // Do NOT block resources on JobStreet to allow full hydration
-    const browserPage = await createPage(context, { blockResources: false });
+    const browserPage = await createPage(context, { blockResources: true });
 
     try {
-      await browserPage.goto(url, { waitUntil: "domcontentloaded", timeout: 30000 });
-      await randomDelay(3500, 5000);
-
-      // Wait for card title links to appear
+      await browserPage.goto(url, { waitUntil: "domcontentloaded", timeout: 20000 });
+      // Wait for card title links or article to be present
       await browserPage
-        .waitForSelector('a[href*="origin=cardTitle"], article', { timeout: 15000 })
+        .waitForSelector('a[href*="origin=cardTitle"], article', { timeout: 8000 })
         .catch(() => logger.warn("[JobStreet] Card selector timeout, proceeding with whatever is rendered"));
+      await randomDelay(800, 1500);
 
       type RawCard = {
         title: string;
@@ -61,7 +60,7 @@ export class JobStreetScraper implements IScraper {
 
         if (titleLinks.length > 0) {
           return titleLinks.map((link) => {
-            const container = (link.closest("article") ?? link.closest("[data-card-type]") ?? link.parentElement?.parentElement?.parentElement) as HTMLElement | null;
+            const container = (link.closest("article") ?? link.closest("[data-card-type]") ?? link.parentElement?.parentElement?.parentElement?.parentElement) as HTMLElement | null;
             return {
               title: link.innerText.trim(),
               href: link.href.split("?")[0],
@@ -103,6 +102,7 @@ export class JobStreetScraper implements IScraper {
         let salaryRaw: string | null = null;
         let employmentRaw: string | null = null;
         let description: string | null = null;
+        let postedRaw: string | null = null;
 
         for (let i = 0; i < card.lines.length; i++) {
           const line = card.lines[i];
@@ -125,6 +125,16 @@ export class JobStreetScraper implements IScraper {
             }
           }
 
+          // Date patterns: "1 hari yang lalu", "Listed more than one day ago", "Listed 5 days ago", "1d ago", "3h"
+          if (
+            /(\d+)\s*(hari|jam|minggu|bulan)\s*(yang\s+lalu|lalu)?/i.test(line) ||
+            /listed\s+(more\s+than\s+)?\w+\s+(day|days|hour|week|month)/i.test(line) ||
+            /(\d+)\s*(day|days|hour|hours|week|weeks|month|months)\s*ago/i.test(line) ||
+            /^\d+[dhm]\s*ago$/i.test(line)
+          ) {
+            if (!postedRaw) postedRaw = line;
+          }
+
           if (line.length > 50 && !line.includes("classification") && !line.includes("subClassification")) {
             if (!description) description = line;
           }
@@ -143,7 +153,7 @@ export class JobStreetScraper implements IScraper {
             salary_raw: salaryRaw,
             ...salaryData,
             source_url: card.href,
-            posted_at: null,
+            posted_at: parsePostedAt(postedRaw),
           })
         );
       }
