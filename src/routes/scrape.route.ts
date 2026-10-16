@@ -70,9 +70,12 @@ scrapeRouter.get("/", async (req: Request, res: Response) => {
         allResults.push(...results);
         logger.info(`[API] Finished ${source}: ${results.length} results`);
       } catch (err) {
-        const isBrowserMissing = err instanceof BrowserUnavailableError;
-        const msg = `${source}: ${String(err)}`;
-        errors.push(isBrowserMissing ? `${source}: browser_unavailable` : msg);
+        const isBrowserMissing =
+          err instanceof BrowserUnavailableError ||
+          String(err).includes("browser_unavailable") ||
+          String(err).includes("Executable doesn't exist");
+        const msg = isBrowserMissing ? `${source}: browser_unavailable` : `${source}: ${String(err)}`;
+        errors.push(msg);
         logger.error("[API] Scraper failed", { source, error: String(err) });
       }
     })
@@ -89,7 +92,7 @@ scrapeRouter.get("/", async (req: Request, res: Response) => {
       success: false,
       source: sources.length === 1 ? sources[0] : "multi",
       error: isBrowserError
-        ? "Browser scraping tidak tersedia di environment ini. Deploy ke Railway/Render untuk mengaktifkan fitur ini."
+        ? "Browser automation (Chromium) tidak tersedia di hosting serverless Vercel. Sumber ini memerlukan runtime browser penuh. Silakan gunakan sumber LinkedIn yang didukung atau jalankan scraper lokal (localhost:3001)."
         : "Semua sumber gagal di-scrape.",
       detail: errors.join(" | "),
     };
@@ -145,7 +148,10 @@ async function handleCategoryScrape(
         allResults.push(...results);
         logger.info(`[API] Finished ${source}: ${results.length} results`);
       } catch (err) {
-        const isBrowserMissing = err instanceof BrowserUnavailableError;
+        const isBrowserMissing =
+          err instanceof BrowserUnavailableError ||
+          String(err).includes("browser_unavailable") ||
+          String(err).includes("Executable doesn't exist");
         const msg = isBrowserMissing ? `${source}: browser_unavailable` : `${source}: ${String(err)}`;
         errors.push(msg);
         logger.error(`[API] Scraper failed (${source})`, { error: String(err) });
@@ -164,7 +170,7 @@ async function handleCategoryScrape(
       success: false,
       source: "multi",
       error: isBrowserError
-        ? "Browser scraping tidak tersedia di environment ini. Deploy ke Railway/Render untuk mengaktifkan fitur ini."
+        ? `Browser automation (Chromium) tidak tersedia di hosting serverless Vercel. Sumber kategori ${category} memerlukan runtime browser penuh. Silakan gunakan sumber LinkedIn yang didukung atau jalankan scraper lokal (localhost:3001).`
         : `Semua sumber ${category} gagal di-scrape.`,
       detail: errors.join(" | "),
     };
@@ -261,12 +267,15 @@ scrapeRouter.get("/:source", async (req: Request, res: Response) => {
     res.json(successRes);
   } catch (err) {
     logger.error("[API] Scrape error", { source, error: String(err) });
-    const isBrowserMissing = err instanceof BrowserUnavailableError;
+    const isBrowserMissing =
+      err instanceof BrowserUnavailableError ||
+      String(err).includes("browser_unavailable") ||
+      String(err).includes("Executable doesn't exist");
     const errRes: ScrapeErrorResponse = {
       success: false,
       source,
       error: isBrowserMissing
-        ? "Browser scraping tidak tersedia di environment ini. Deploy ke Railway/Render untuk mengaktifkan fitur ini."
+        ? `Browser automation (Chromium) tidak tersedia di hosting serverless Vercel untuk sumber '${source}'. Silakan gunakan sumber LinkedIn yang didukung atau jalankan scraper lokal (localhost:3001).`
         : "Gagal scraping dari sumber ini.",
       detail: String(err),
     };

@@ -36,8 +36,9 @@ export interface PageOptions {
 }
 
 export class BrowserUnavailableError extends Error {
-  constructor() {
+  constructor(message?: string) {
     super(
+      message ||
       "Playwright/Chromium is not available in this runtime environment. " +
       "Deploy this service on Railway, Render, or a VPS to enable browser-based scraping."
     );
@@ -47,7 +48,7 @@ export class BrowserUnavailableError extends Error {
 
 /**
  * Get or create the shared browser instance.
- * Throws BrowserUnavailableError if Playwright is not installed/accessible.
+ * Throws BrowserUnavailableError if Playwright is not installed/accessible or binary is missing.
  */
 export async function getBrowser(opts: BrowserPoolOptions = {}): Promise<Browser> {
   if (!(await checkPlaywright())) {
@@ -64,22 +65,30 @@ export async function getBrowser(opts: BrowserPoolOptions = {}): Promise<Browser
 
   logger.info("[Browser] Launching Chromium", { headless, slowMo });
 
-  browser = await chromium.launch({
-    headless,
-    slowMo,
-    args: [
-      "--no-sandbox",
-      "--disable-setuid-sandbox",
-      "--disable-dev-shm-usage",
-      "--disable-blink-features=AutomationControlled",
-      "--disable-extensions",
-      "--no-first-run",
-      "--disable-default-apps",
-      "--disable-infobars",
-      "--window-size=1366,768",
-      "--lang=id-ID,id",
-    ],
-  });
+  try {
+    browser = await chromium.launch({
+      headless,
+      slowMo,
+      args: [
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-blink-features=AutomationControlled",
+        "--disable-extensions",
+        "--no-first-run",
+        "--disable-default-apps",
+        "--disable-infobars",
+        "--window-size=1366,768",
+        "--lang=id-ID,id",
+      ],
+    });
+  } catch (launchErr: unknown) {
+    logger.warn("[Browser] Failed to launch Chromium binary", { error: String(launchErr) });
+    throw new BrowserUnavailableError(
+      "Chromium browser binary tidak tersedia di environment ini (Vercel Serverless Function). " +
+      "Gunakan Railway/Render atau local service untuk scraper berbasis browser."
+    );
+  }
 
   browser.on("disconnected", () => {
     logger.warn("[Browser] Browser disconnected, will relaunch on next request");
