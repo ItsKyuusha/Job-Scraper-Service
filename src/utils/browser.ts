@@ -1,7 +1,28 @@
-import { chromium, Browser, BrowserContext, Page } from "playwright";
 import { logger } from "./logger.js";
 
+// ─── Playwright availability guard ───────────────────────────────────────────
+// Vercel Functions do not ship Chromium. Any attempt to import playwright and
+// call chromium.launch() will throw an error at module load time or at runtime.
+// We lazy-import playwright so the process can still start and serve /health
+// even when no browser binary is present.
+
+type Browser = import("playwright").Browser;
+type BrowserContext = import("playwright").BrowserContext;
+type Page = import("playwright").Page;
+
 let browser: Browser | null = null;
+let playwrightAvailable: boolean | null = null;
+
+async function checkPlaywright(): Promise<boolean> {
+  if (playwrightAvailable !== null) return playwrightAvailable;
+  try {
+    await import("playwright");
+    playwrightAvailable = true;
+  } catch {
+    playwrightAvailable = false;
+  }
+  return playwrightAvailable;
+}
 
 interface BrowserPoolOptions {
   headless?: boolean;
@@ -14,15 +35,30 @@ export interface PageOptions {
   blockResources?: boolean;
 }
 
+export class BrowserUnavailableError extends Error {
+  constructor() {
+    super(
+      "Playwright/Chromium is not available in this runtime environment. " +
+      "Deploy this service on Railway, Render, or a VPS to enable browser-based scraping."
+    );
+    this.name = "BrowserUnavailableError";
+  }
+}
+
 /**
  * Get or create the shared browser instance.
- * Chromium configured with stealth arguments.
+ * Throws BrowserUnavailableError if Playwright is not installed/accessible.
  */
 export async function getBrowser(opts: BrowserPoolOptions = {}): Promise<Browser> {
+  if (!(await checkPlaywright())) {
+    throw new BrowserUnavailableError();
+  }
+
   if (browser && browser.isConnected()) {
     return browser;
   }
 
+  const { chromium } = await import("playwright");
   const headless = opts.headless ?? process.env.SCRAPER_HEADLESS !== "false";
   const slowMo = opts.slowMo ?? Number(process.env.SCRAPER_SLOW_MO ?? 0);
 
@@ -84,9 +120,7 @@ export async function createContext(b: Browser): Promise<BrowserContext> {
 }
 
 /**
- * Create a new page.
- * Note: By default, `blockResources` is false because modern SPAs (JobStreet, Glints)
- * depend on fonts / scripts / websockets for fingerprint verification.
+ * Create a new page with optional resource blocking.
  */
 export async function createPage(context: BrowserContext, opts?: PageOptions): Promise<Page> {
   const page = await context.newPage();
@@ -94,13 +128,10 @@ export async function createPage(context: BrowserContext, opts?: PageOptions): P
   page.setDefaultTimeout(timeout);
   page.setDefaultNavigationTimeout(timeout);
 
-  // By default block heavy binary media assets (images, fonts, stylesheets, media)
-  // to drastically speed up network transfers while keeping DOM & JavaScript execution intact.
   const shouldBlock = opts?.blockResources ?? true;
   if (shouldBlock) {
     await page.route("**/*", (route) => {
       const type = route.request().resourceType();
-      // Block images, videos, audio, and font downloads which are not needed for text extraction
       if (["image", "media", "font"].includes(type)) {
         route.abort();
       } else {
@@ -122,3 +153,4 @@ export async function closeBrowser(): Promise<void> {
     browser = null;
   }
 }
+

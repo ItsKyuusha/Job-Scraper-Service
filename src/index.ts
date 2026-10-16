@@ -6,11 +6,9 @@ import morgan from "morgan";
 import { scrapeRouter } from "./routes/scrape.route.js";
 import { queueRouter } from "./routes/queue.route.js";
 import { rateLimiter, errorHandler, notFound } from "./middleware/index.js";
-import { closeBrowser } from "./utils/browser.js";
 import { logger } from "./utils/logger.js";
 
 const app = express();
-const PORT = Number(process.env.PORT ?? 3001);
 
 // ─── Core Middleware ──────────────────────────────────────────────────────────
 app.use(
@@ -78,32 +76,36 @@ app.use("/api/queue", queueRouter);
 app.use(notFound);
 app.use(errorHandler);
 
-// ─── Start Server ─────────────────────────────────────────────────────────────
-const server = app.listen(PORT, () => {
-  logger.info(`[Server] CareerSync Scraper Service running on http://localhost:${PORT}`);
-  logger.info(`[Server] Sources: linkedin, jobstreet, glints, threads`);
-  logger.info(`[Server] Environment: ${process.env.NODE_ENV ?? "development"}`);
-});
-
-// ─── Graceful Shutdown ────────────────────────────────────────────────────────
-async function shutdown(signal: string): Promise<void> {
-  logger.info(`[Server] Received ${signal}, shutting down gracefully...`);
-  server.close(async () => {
-    await closeBrowser();
-    logger.info("[Server] Server closed. Bye!");
-    process.exit(0);
+// ─── Start Server (local/Railway/Render only — Vercel uses exported app) ──────
+if (process.env.VERCEL !== "1") {
+  const PORT = Number(process.env.PORT ?? 3001);
+  const server = app.listen(PORT, () => {
+    logger.info(`[Server] CareerSync Scraper Service running on http://localhost:${PORT}`);
+    logger.info(`[Server] Sources: linkedin, jobstreet, glints, threads`);
+    logger.info(`[Server] Environment: ${process.env.NODE_ENV ?? "development"}`);
   });
 
-  // Force exit after 10 seconds
-  setTimeout(() => {
-    logger.error("[Server] Forced shutdown after timeout");
-    process.exit(1);
-  }, 10_000);
+  async function shutdown(signal: string): Promise<void> {
+    logger.info(`[Server] Received ${signal}, shutting down gracefully...`);
+    const { closeBrowser } = await import("./utils/browser.js");
+    server.close(async () => {
+      await closeBrowser();
+      logger.info("[Server] Server closed. Bye!");
+      process.exit(0);
+    });
+    setTimeout(() => {
+      logger.error("[Server] Forced shutdown after timeout");
+      process.exit(1);
+    }, 10_000);
+  }
+
+  process.on("SIGTERM", () => shutdown("SIGTERM"));
+  process.on("SIGINT", () => shutdown("SIGINT"));
+  process.on("uncaughtException", (err) => {
+    logger.error("[Server] Uncaught exception", { error: err.message, stack: err.stack });
+    shutdown("uncaughtException");
+  });
 }
 
-process.on("SIGTERM", () => shutdown("SIGTERM"));
-process.on("SIGINT", () => shutdown("SIGINT"));
-process.on("uncaughtException", (err) => {
-  logger.error("[Server] Uncaught exception", { error: err.message, stack: err.stack });
-  shutdown("uncaughtException");
-});
+export default app;
+

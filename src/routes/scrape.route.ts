@@ -4,6 +4,7 @@ import { v4 as uuidv4 } from "uuid";
 import { scraperRegistry } from "../scrapers/registry.js";
 import { scrapeQueue } from "../queue/scrape-queue.js";
 import { normalizeKeyword, deduplicateJobs } from "../utils/helpers.js";
+import { BrowserUnavailableError } from "../utils/browser.js";
 import {
   type ScrapeQuery,
   type ScraperSource,
@@ -16,8 +17,8 @@ import { logger } from "../utils/logger.js";
 
 export const scrapeRouter = Router();
 
-// Limit concurrent browser tabs to avoid RAM starvation and timeouts on single machine
-const scrapeConcurrency = pLimit(1);
+// Limit concurrent browser sessions — unused directly here but kept for future use
+const _scrapeConcurrency = pLimit(1);
 
 // ─── Validation helper ────────────────────────────────────────────────────────
 
@@ -69,8 +70,9 @@ scrapeRouter.get("/", async (req: Request, res: Response) => {
         allResults.push(...results);
         logger.info(`[API] Finished ${source}: ${results.length} results`);
       } catch (err) {
+        const isBrowserMissing = err instanceof BrowserUnavailableError;
         const msg = `${source}: ${String(err)}`;
-        errors.push(msg);
+        errors.push(isBrowserMissing ? `${source}: browser_unavailable` : msg);
         logger.error("[API] Scraper failed", { source, error: String(err) });
       }
     })
@@ -82,13 +84,16 @@ scrapeRouter.get("/", async (req: Request, res: Response) => {
   const uniqueResults = deduplicateJobs(allResults);
 
   if (uniqueResults.length === 0 && errors.length > 0) {
+    const isBrowserError = errors.every((e) => e.includes("browser_unavailable"));
     const errRes: ScrapeErrorResponse = {
       success: false,
       source: sources.length === 1 ? sources[0] : "multi",
-      error: "Semua sumber gagal di-scrape.",
+      error: isBrowserError
+        ? "Browser scraping tidak tersedia di environment ini. Deploy ke Railway/Render untuk mengaktifkan fitur ini."
+        : "Semua sumber gagal di-scrape.",
       detail: errors.join(" | "),
     };
-    res.status(502).json(errRes);
+    res.status(isBrowserError ? 503 : 502).json(errRes);
     return;
   }
 
@@ -140,7 +145,8 @@ async function handleCategoryScrape(
         allResults.push(...results);
         logger.info(`[API] Finished ${source}: ${results.length} results`);
       } catch (err) {
-        const msg = `${source}: ${String(err)}`;
+        const isBrowserMissing = err instanceof BrowserUnavailableError;
+        const msg = isBrowserMissing ? `${source}: browser_unavailable` : `${source}: ${String(err)}`;
         errors.push(msg);
         logger.error(`[API] Scraper failed (${source})`, { error: String(err) });
       }
@@ -153,13 +159,16 @@ async function handleCategoryScrape(
   const uniqueResults = deduplicateJobs(allResults);
 
   if (uniqueResults.length === 0 && errors.length > 0) {
+    const isBrowserError = errors.every((e) => e.includes("browser_unavailable"));
     const errRes: ScrapeErrorResponse = {
       success: false,
       source: "multi",
-      error: `Semua sumber ${category} gagal di-scrape.`,
+      error: isBrowserError
+        ? "Browser scraping tidak tersedia di environment ini. Deploy ke Railway/Render untuk mengaktifkan fitur ini."
+        : `Semua sumber ${category} gagal di-scrape.`,
       detail: errors.join(" | "),
     };
-    res.status(502).json(errRes);
+    res.status(isBrowserError ? 503 : 502).json(errRes);
     return;
   }
 
@@ -252,13 +261,16 @@ scrapeRouter.get("/:source", async (req: Request, res: Response) => {
     res.json(successRes);
   } catch (err) {
     logger.error("[API] Scrape error", { source, error: String(err) });
+    const isBrowserMissing = err instanceof BrowserUnavailableError;
     const errRes: ScrapeErrorResponse = {
       success: false,
       source,
-      error: "Gagal scraping dari sumber ini.",
+      error: isBrowserMissing
+        ? "Browser scraping tidak tersedia di environment ini. Deploy ke Railway/Render untuk mengaktifkan fitur ini."
+        : "Gagal scraping dari sumber ini.",
       detail: String(err),
     };
-    res.status(502).json(errRes);
+    res.status(isBrowserMissing ? 503 : 502).json(errRes);
   }
 });
 
